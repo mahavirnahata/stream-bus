@@ -1,0 +1,41 @@
+{
+  "name": "mahavirnahata/stream-bus",
+  "description": "Redis-backed cross-language stream bus for Laravel.",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": "^8.2",
+    "illuminate/support": "^11.0|^12.0",
+    "illuminate/redis": "^11.0|^12.0",
+    "illuminate/console": "^11.0|^12.0",
+    "illuminate/contracts": "^11.0|^12.0",
+    "ramsey/uuid": "^4.7"
+  },
+  "autoload": {
+    "psr-4": {
+      "MahavirNahata\\StreamBus\\": "src/"
+    },
+    "files": [
+      "src/helpers.php"
+    ]
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "MahavirNahata\\StreamBus\\Tests\\": "tests/"
+    }
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.5"
+  },
+  "extra": {
+    "laravel": {
+      "providers": [
+        "MahavirNahata\\StreamBus\\StreamBusServiceProvider"
+      ],
+      "aliases": {
+        "StreamBus": "MahavirNahata\\StreamBus\\Facades\\StreamBus"
+      }
+    }
+  },
+  "minimum-stability": "stable"
+}
