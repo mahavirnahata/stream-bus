@@ -2,7 +2,13 @@
 
 A small Redis-backed stream bus for cross-language workers. Supports Redis Streams and Lists, configurable via `config/stream-bus.php`.
 
-## Install (local)
+## Install (Packagist)
+
+```bash
+composer require mahavirnahata/stream-bus
+```
+
+## Install (local development)
 Add a path repository and require the package:
 
 ```json
@@ -95,6 +101,16 @@ return [
     'delivery' => env('STREAM_BUS_DELIVERY', 'at-least-once'), // at-least-once|effectively-once
     'dedupe_ttl' => env('STREAM_BUS_DEDUPE_TTL', 86400),
 ];
+```
+
+### Shared Redis guidance
+
+This package only reads from the **configured stream/list key**, not the whole Redis instance.
+If you share Redis with other apps, use a **unique prefix** or a **separate Redis connection/db**:
+
+```env
+STREAM_BUS_PREFIX=app1:bus:
+STREAM_BUS_REDIS=stream-bus
 ```
 
 ## Publish messages
