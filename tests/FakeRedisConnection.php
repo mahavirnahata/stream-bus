@@ -9,6 +9,7 @@ class FakeRedisConnection
     public array $lists = [];
     public array $acked = [];
     public array $kv = [];
+    public array $groupsCreated = [];
 
     public function xadd(string $stream, string $id, array $fields)
     {
@@ -27,6 +28,7 @@ class FakeRedisConnection
             $group = $args[2];
 
             $this->groups[$stream][$group] = true;
+            $this->groupsCreated[] = [$stream, $group];
 
             if (! isset($this->streams[$stream])) {
                 $this->streams[$stream] = [];
