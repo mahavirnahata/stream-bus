@@ -2,6 +2,20 @@
 
 A small Redis-backed stream bus for cross-language workers. Supports Redis Streams and Lists, configurable via `config/stream-bus.php`.
 
+## Requirements
+
+- PHP 8.2+
+- Laravel 11/12
+- Redis server
+
+## Features
+
+- Redis Streams and Lists drivers
+- Consumer command with long-running loop
+- Cross-language interoperability (Node, Go, Python)
+- Optional dedupe for effectively-once processing
+- Multiple consumers configured via config
+
 ## Install (Packagist)
 
 ```bash
@@ -43,6 +57,12 @@ Run a consumer from Laravel:
 
 ```bash
 php artisan stream-bus:consume events:inbound App\Handlers\ImageResultHandler --group=laravel
+```
+
+You can also configure consumers in `config/stream-bus.php` and run:
+
+```bash
+php artisan stream-bus:consume
 ```
 
 ## End-to-end examples
@@ -91,6 +111,12 @@ Run:
 php artisan stream-bus:consume events:inbound App\\Handlers\\ImageResultHandler --group=laravel
 ```
 
+Or, with config:
+
+```bash
+php artisan stream-bus:consume
+```
+
 ## Configuration
 
 ```php
@@ -100,8 +126,26 @@ return [
     'prefix' => env('STREAM_BUS_PREFIX', 'stream-bus:'),
     'delivery' => env('STREAM_BUS_DELIVERY', 'at-least-once'), // at-least-once|effectively-once
     'dedupe_ttl' => env('STREAM_BUS_DEDUPE_TTL', 86400),
+    'consumers' => [
+        'events:inbound' => App\Handlers\ImageResultHandler::class,
+        'events:other' => [
+            'handler' => App\Handlers\OtherHandler::class,
+            'driver' => 'streams',
+            'group' => 'other-group',
+            'block' => 2000,
+        ],
+    ],
 ];
 ```
+
+### Config reference
+
+- `driver`: `streams` or `lists`
+- `connection`: Redis connection name
+- `prefix`: Key prefix for all topics
+- `delivery`: `at-least-once` or `effectively-once`
+- `dedupe_ttl`: Dedupe TTL in seconds
+- `consumers`: Map of `topic => handler` or `topic => options`
 
 ### Shared Redis guidance
 
@@ -146,6 +190,30 @@ class ImageResultHandler implements StreamBusHandler
 php artisan stream-bus:consume events:inbound App\Handlers\ImageResultHandler --group=laravel
 ```
 
+Or, with config (single or multiple consumers):
+
+```bash
+php artisan stream-bus:consume
+```
+
+## Consumer command options
+
+- `topic`: Topic name (optional if configured)
+- `handler`: Handler class (optional if configured)
+- `--driver`: `streams` or `lists`
+- `--connection`: Redis connection
+- `--prefix`: Key prefix
+- `--group`: Consumer group (streams)
+- `--consumer`: Consumer name (streams, defaults to hostname)
+- `--count`: Messages per read (streams)
+- `--block`: Block time in ms (streams) or seconds (lists)
+- `--delivery`: `at-least-once` or `effectively-once`
+- `--dedupe-ttl`: Dedupe TTL seconds
+- `--once`: Read once and exit
+- `--sleep`: Sleep ms when no messages
+- `--no-ack`: Disable ACK (streams)
+- `--stop-on-error`: Exit if handler throws
+
 ### Delivery semantics
 
 - **at-least-once**: default
@@ -187,6 +255,23 @@ Examples are in `examples/`.
 
 - **Streams** and **Lists** are **at-least-once** by default.
 - **Effectively-once** uses best-effort dedupe for a configurable TTL.
+
+## Troubleshooting
+
+- Consumer exits immediately: ensure your handler class exists and implements `StreamBusHandler`, and `consumers` is not empty when using config.
+- No messages received: verify the topic name and prefix, and for streams ensure the correct group/consumer is used.
+- Duplicate processing: use `delivery=effectively-once` and a reasonable `dedupe_ttl`.
+
+## FAQ
+
+**Does it scan all Redis keys?**  
+No. It only reads the configured topic key with your prefix.
+
+**Can I run multiple consumers?**  
+Yes. Define multiple entries in `consumers` and run `php artisan stream-bus:consume`.
+
+**Exactly-once?**  
+Not guaranteed. Use effectively-once with idempotent handlers.
 
 ## License
 

@@ -39,4 +39,28 @@ return [
     |--------------------------------------------------------------------------
     */
     'dedupe_ttl' => env('STREAM_BUS_DEDUPE_TTL', 86400),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Consumers
+    |--------------------------------------------------------------------------
+    | Map topics to handler classes.
+    | Example:
+    | 'consumers' => [
+    |     'events:inbound' => App\Handlers\ImageResultHandler::class,
+    | ],
+    */
+    'consumers' => [
+        // 'topic' => HandlerClass::class,
+        // 'topic' => [
+        //     'handler' => HandlerClass::class,
+        //     'driver' => 'streams',
+        //     'group' => 'default',
+        //     'consumer' => null,
+        //     'count' => 1,
+        //     'block' => 5000,
+        //     'delivery' => 'at-least-once',
+        //     'dedupe_ttl' => 86400,
+        // ],
+    ],
 ];
