@@ -97,7 +97,6 @@ class StreamBusTest extends TestCase
         ]);
 
         $bus->publish('events:outbound', ['foo' => 'reclaimed']);
-        // Simulate the message already being read but not ACKed by seeding the stream directly
         $reclaimed = $bus->reclaim('events:outbound', ['group' => 'g1', 'consumer' => 'c1']);
 
         $this->assertCount(1, $reclaimed);
@@ -112,6 +111,49 @@ class StreamBusTest extends TestCase
         $result = $bus->reclaim('events:outbound');
 
         $this->assertSame([], $result);
+    }
+
+    // -------------------------------------------------------------------------
+    // ensureGroupExists — BUSYGROUP silencing
+    // -------------------------------------------------------------------------
+
+    public function test_busygroup_exception_is_silenced_and_read_continues(): void
+    {
+        $connection = new class extends FakeRedisConnection {
+            public function xgroup(...$args): bool
+            {
+                throw new \RuntimeException('BUSYGROUP Consumer Group name already exists');
+            }
+        };
+
+        $bus = new StreamBus(new FakeRedisFactory($connection), [
+            'driver' => 'streams',
+            'prefix' => 'stream-bus:',
+        ]);
+
+        // Must not throw; group-already-exists is a normal condition
+        $messages = $bus->read('events:outbound', ['group' => 'g1', 'consumer' => 'c1']);
+        $this->assertSame([], $messages);
+    }
+
+    public function test_non_busygroup_xgroup_exception_propagates(): void
+    {
+        $connection = new class extends FakeRedisConnection {
+            public function xgroup(...$args): bool
+            {
+                throw new \RuntimeException('WRONGTYPE Operation against a key holding the wrong kind of value');
+            }
+        };
+
+        $bus = new StreamBus(new FakeRedisFactory($connection), [
+            'driver' => 'streams',
+            'prefix' => 'stream-bus:',
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('WRONGTYPE');
+
+        $bus->read('events:outbound', ['group' => 'g1', 'consumer' => 'c1']);
     }
 
     // -------------------------------------------------------------------------
@@ -184,7 +226,6 @@ class StreamBusTest extends TestCase
         $messages = $bus->read('events:outbound', ['block' => 0]);
         $this->assertCount(1, $messages);
 
-        // Simulate handler failure: re-queue for retry
         $bus->retry('events:outbound', $messages[0]['message']);
 
         $retried = $bus->read('events:outbound', ['block' => 0]);
@@ -197,7 +238,6 @@ class StreamBusTest extends TestCase
         $connection = new FakeRedisConnection();
         $bus = new StreamBus(new FakeRedisFactory($connection), ['driver' => 'streams']);
 
-        // Should not throw; streams use PEL for retry
         $bus->retry('events:outbound', ['id' => 'abc', 'payload' => []]);
 
         $this->assertEmpty($connection->lists);
@@ -231,7 +271,7 @@ class StreamBusTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
-    // Attempt tracking
+    // Attempt tracking (atomic via Lua eval)
     // -------------------------------------------------------------------------
 
     public function test_increment_attempts_tracks_delivery_count(): void
@@ -276,6 +316,41 @@ class StreamBusTest extends TestCase
         $this->assertTrue($bus->shouldProcess('events:outbound', '1-1'));
         $this->assertFalse($bus->shouldProcess('events:outbound', '1-1'));
         $this->assertArrayHasKey('stream-bus:events:outbound:dedupe:1-1', $connection->kv);
+    }
+
+    // -------------------------------------------------------------------------
+    // Redis Cluster — hash-tag key format
+    // -------------------------------------------------------------------------
+
+    public function test_cluster_mode_wraps_topic_in_hash_tags(): void
+    {
+        $connection = new FakeRedisConnection();
+        $bus = new StreamBus(new FakeRedisFactory($connection), [
+            'driver' => 'lists',
+            'prefix' => 'stream-bus:',
+            'cluster' => true,
+        ]);
+
+        $bus->publish('events:outbound', ['foo' => 'bar']);
+
+        $this->assertArrayHasKey('stream-bus:{events:outbound}', $connection->lists);
+    }
+
+    public function test_cluster_mode_dedupe_key_shares_hash_tag(): void
+    {
+        $connection = new FakeRedisConnection();
+        $bus = new StreamBus(new FakeRedisFactory($connection), [
+            'driver' => 'streams',
+            'prefix' => 'stream-bus:',
+            'cluster' => true,
+            'delivery' => 'effectively-once',
+        ]);
+
+        $bus->shouldProcess('events:outbound', '1-1');
+
+        // The dedupe key must share the same hash tag as the stream key so they
+        // land on the same Redis Cluster slot.
+        $this->assertArrayHasKey('stream-bus:{events:outbound}:dedupe:1-1', $connection->kv);
     }
 
     // -------------------------------------------------------------------------
@@ -344,7 +419,6 @@ class StreamBusTest extends TestCase
             'prefix' => 'stream-bus:',
         ]);
 
-        // Inject a corrupt message directly
         $connection->streams['stream-bus:events:outbound']['1-1'] = ['message' => '{not valid json'];
         $connection->groups['stream-bus:events:outbound']['g1'] = true;
 

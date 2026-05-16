@@ -36,13 +36,11 @@ class StreamBus
         $encoded = json_encode($message, JSON_THROW_ON_ERROR);
 
         if ($driver === 'streams') {
-            $maxlen = $options['maxlen'] ?? $this->config['maxlen'] ?? null;
+            $id = $this->connection($options)->xadd($key, '*', ['message' => $encoded]);
 
-            // phpredis 4.0+ supports xadd($key, $id, $fields, $maxlen, $approximate)
+            $maxlen = $options['maxlen'] ?? $this->config['maxlen'] ?? null;
             if ($maxlen !== null) {
-                $id = $this->connection($options)->xadd($key, '*', ['message' => $encoded], (int) $maxlen, true);
-            } else {
-                $id = $this->connection($options)->xadd($key, '*', ['message' => $encoded]);
+                $this->trimStream($key, (int) $maxlen, $options);
             }
 
             return (string) $id;
@@ -181,17 +179,25 @@ class StreamBus
 
     /**
      * Increment and return the delivery attempt count for a message.
+     *
+     * Uses a Lua script so INCR and EXPIRE are atomic — a process crash between
+     * the two commands cannot leave a key with no TTL.
+     *
+     * Laravel normalises eval args for both phpredis and predis:
+     *   eval($script, $numKeys, $key1, ..., $arg1, ...)
      */
     public function incrementAttempts(string $topic, string $id, array $options = []): int
     {
         $ttl = (int) ($options['dedupe_ttl'] ?? $this->config['dedupe_ttl'] ?? 86400);
         $key = $this->key($topic, $options).':attempts:'.$id;
-        $conn = $this->connection($options);
 
-        $attempts = (int) $conn->incr($key);
-        $conn->expire($key, $ttl);
+        $lua = <<<'LUA'
+local v = redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+return v
+LUA;
 
-        return $attempts;
+        return (int) $this->connection($options)->eval($lua, 1, $key, $ttl);
     }
 
     /**
@@ -238,11 +244,22 @@ class StreamBus
         return $this->redis->connection($connection);
     }
 
+    /**
+     * Build the Redis key for a topic.
+     *
+     * When cluster=true the topic is wrapped in {braces} so that the stream key,
+     * dedupe key, and attempts key all hash to the same Redis Cluster slot.
+     * Without hash tags those keys may land on different nodes, breaking Lua
+     * scripts and multi-key operations.
+     */
     protected function key(string $topic, array $options): string
     {
         $prefix = $options['prefix'] ?? $this->config['prefix'] ?? 'stream-bus:';
+        $cluster = $options['cluster'] ?? $this->config['cluster'] ?? false;
 
-        return $prefix.$topic;
+        return $cluster
+            ? $prefix.'{'.$topic.'}'
+            : $prefix.$topic;
     }
 
     protected function validateTopic(string $topic): void
@@ -270,12 +287,39 @@ class StreamBus
         }
     }
 
+    /**
+     * Trim a Redis Stream to at most $maxlen entries (approximate).
+     *
+     * phpredis and predis use different calling conventions for XTRIM, so we
+     * detect the underlying client and call accordingly. Both branches produce
+     * an approximate trim with the '~' modifier, which is O(1) and safe for
+     * high-throughput streams.
+     */
+    protected function trimStream(string $key, int $maxlen, array $options): void
+    {
+        $conn = $this->connection($options);
+
+        // phpredis: client() returns a \Redis instance; predis returns a Predis\Client
+        if (method_exists($conn, 'client') && $conn->client() instanceof \Redis) {
+            $conn->xtrim($key, $maxlen, true);
+
+            return;
+        }
+
+        // Predis 2.x / unknown clients: xtrim($key, 'MAXLEN', '~', $count)
+        try {
+            $conn->xtrim($key, 'MAXLEN', '~', $maxlen);
+        } catch (\Throwable) {
+            // Cannot trim; stream will grow until managed externally.
+        }
+    }
+
     protected function ensureGroupExists(string $stream, string $group, array $options = []): void
     {
         try {
             $this->connection($options)->xgroup('CREATE', $stream, $group, '0', 'MKSTREAM');
         } catch (\Throwable $e) {
-            // Only silence "group already exists"; propagate connection and other errors
+            // Only silence "group already exists"; propagate connection and all other errors
             if (! str_contains($e->getMessage(), 'BUSYGROUP')) {
                 throw $e;
             }

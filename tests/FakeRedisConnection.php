@@ -11,15 +11,11 @@ class FakeRedisConnection
     public array $kv = [];
     public array $groupsCreated = [];
 
-    public function xadd(string $stream, string $id, array $fields, ?int $maxlen = null, bool $approximate = false): string
+    public function xadd(string $stream, string $id, array $fields): string
     {
         $id = $id === '*' ? $this->nextId($stream) : $id;
 
         $this->streams[$stream][$id] = $fields;
-
-        if ($maxlen !== null && count($this->streams[$stream]) > $maxlen) {
-            $this->streams[$stream] = array_slice($this->streams[$stream], -$maxlen, null, true);
-        }
 
         return $id;
     }
@@ -79,6 +75,37 @@ class FakeRedisConnection
         return ['0-0', $batch];
     }
 
+    /**
+     * XTRIM — trims the stream to at most $maxlen entries.
+     *
+     * Accepts both phpredis-style args (int $maxlen, bool $approximate) and
+     * predis-style args ('MAXLEN', '~', int $maxlen) by scanning for the int.
+     */
+    public function xtrim(string $key, mixed ...$args): int
+    {
+        $maxlen = null;
+        foreach ($args as $arg) {
+            if (is_int($arg) && $arg > 0) {
+                $maxlen = $arg;
+                break;
+            }
+        }
+
+        if ($maxlen === null || empty($this->streams[$key])) {
+            return 0;
+        }
+
+        $count = count($this->streams[$key]);
+        if ($count <= $maxlen) {
+            return 0;
+        }
+
+        $trimmed = $count - $maxlen;
+        $this->streams[$key] = array_slice($this->streams[$key], -$maxlen, null, true);
+
+        return $trimmed;
+    }
+
     public function rpush(string $key, string $value): int
     {
         $this->lists[$key][] = $value;
@@ -87,7 +114,7 @@ class FakeRedisConnection
     }
 
     /**
-     * BLPOP — pops from the head of the list (FIFO with rpush).
+     * BLPOP — pops from the head of the list (FIFO when paired with rpush).
      */
     public function blpop(array $keys, int $timeout): ?array
     {
@@ -113,11 +140,26 @@ class FakeRedisConnection
         return true;
     }
 
-    public function incr(string $key): int
+    /**
+     * Simulate the atomic INCR + EXPIRE Lua script used by incrementAttempts().
+     *
+     * Laravel normalises eval args for both phpredis and predis as:
+     *   eval($script, $numKeys, $key1, ..., $arg1, ...)
+     * So KEYS[1] = $args[0] and ARGV[1] = $args[1] when $numKeys = 1.
+     */
+    public function eval(string $script, int $numkeys, mixed ...$args): mixed
     {
-        $this->kv[$key] = (int) ($this->kv[$key] ?? 0) + 1;
+        $keys = array_slice($args, 0, $numkeys);
 
-        return (int) $this->kv[$key];
+        // Detect the INCR + EXPIRE pattern used by incrementAttempts()
+        if ($numkeys === 1 && str_contains($script, 'INCR') && str_contains($script, 'EXPIRE')) {
+            $key = $keys[0];
+            $this->kv[$key] = (int) ($this->kv[$key] ?? 0) + 1;
+
+            return (int) $this->kv[$key];
+        }
+
+        return null;
     }
 
     public function expire(string $key, int $seconds): bool

@@ -25,15 +25,17 @@ class StreamBusConsumeCommand extends Command
         {--sleep=200 : Sleep in ms between polls when no messages arrive}
         {--no-ack : Do not acknowledge messages (streams only)}
         {--stop-on-error : Exit if the handler throws}
-        {--max-attempts=0 : Max delivery attempts before dead-lettering (0 = unlimited)}
+        {--max-attempts= : Max delivery attempts before dead-lettering (0 = unlimited; falls back to stream-bus.max_attempts config)}
         {--dead-letter-topic= : Override dead-letter topic name}
         {--memory=128 : Exit when process memory exceeds this limit in MB}
-        {--reclaim : Reclaim stale PEL messages on each loop (streams only, requires Redis 6.2+)}
+        {--reclaim : Reclaim stale PEL messages on each loop (streams only, requires Redis 6.2+; also enabled by stream-bus.reclaim config)}
         {--min-idle-time=60000 : Min idle time in ms before a PEL message is eligible for reclaim}';
 
     protected $description = 'Consume messages from the Stream Bus.';
 
     private bool $shouldRun = true;
+
+    private const MAX_CONSECUTIVE_ERRORS = 5;
 
     public function handle(StreamBus $bus, Container $container): int
     {
@@ -70,28 +72,62 @@ class StreamBusConsumeCommand extends Command
         $once = (bool) $this->option('once');
         $stopOnError = (bool) $this->option('stop-on-error');
         $sleepMs = (int) $this->option('sleep');
-        $maxAttempts = (int) $this->option('max-attempts');
         $memoryLimitMb = (int) $this->option('memory');
-        $enableReclaim = (bool) $this->option('reclaim');
+
+        // --max-attempts: CLI flag takes precedence; fall back to config when not passed
+        $maxAttempts = $this->option('max-attempts') !== null
+            ? (int) $this->option('max-attempts')
+            : (int) config('stream-bus.max_attempts', 0);
+
+        // --reclaim flag OR stream-bus.reclaim config key enables PEL recovery
+        $enableReclaim = $this->option('reclaim') || (bool) config('stream-bus.reclaim', false);
 
         $handlers = $this->buildHandlers($container, $consumers);
         if ($handlers === null) {
             return self::FAILURE;
         }
 
+        $consecutiveErrors = 0;
+
         do {
             $any = false;
 
-            // Reclaim stale PEL messages from crashed consumers before reading new ones
-            if ($enableReclaim) {
-                foreach ($handlers as $reclaimTopic => $consumer) {
-                    $topicOptions = $this->perTopicOptions($options, $consumer['options'], count($handlers));
-                    $stale = $bus->reclaim($reclaimTopic, $topicOptions);
+            try {
+                // Reclaim stale PEL messages from crashed consumers before reading new ones
+                if ($enableReclaim) {
+                    foreach ($handlers as $reclaimTopic => $consumer) {
+                        $topicOptions = $this->perTopicOptions($options, $consumer['options'], count($handlers));
+                        $stale = $bus->reclaim($reclaimTopic, $topicOptions);
 
-                    foreach ($stale as $message) {
-                        $any = true;
+                        foreach ($stale as $message) {
+                            $any = true;
+                            $result = $this->processMessage(
+                                $bus, $consumer['handler'], $reclaimTopic,
+                                $message, $topicOptions, $ack, $maxAttempts, $once, $stopOnError
+                            );
+
+                            if ($result === self::FAILURE) {
+                                return self::FAILURE;
+                            }
+                        }
+                    }
+                }
+
+                foreach ($handlers as $currentTopic => $consumer) {
+                    $handler = $consumer['handler'];
+                    $topicOptions = $this->perTopicOptions($options, $consumer['options'], count($handlers));
+
+                    $messages = $bus->read($currentTopic, $topicOptions);
+
+                    if (empty($messages)) {
+                        continue;
+                    }
+
+                    $any = true;
+
+                    foreach ($messages as $message) {
                         $result = $this->processMessage(
-                            $bus, $consumer['handler'], $reclaimTopic,
+                            $bus, $handler, $currentTopic,
                             $message, $topicOptions, $ack, $maxAttempts, $once, $stopOnError
                         );
 
@@ -100,30 +136,24 @@ class StreamBusConsumeCommand extends Command
                         }
                     }
                 }
-            }
 
-            foreach ($handlers as $currentTopic => $consumer) {
-                $handler = $consumer['handler'];
-                $topicOptions = $this->perTopicOptions($options, $consumer['options'], count($handlers));
+                $consecutiveErrors = 0;
+            } catch (\Exception $e) {
+                $consecutiveErrors++;
+                $this->error(sprintf(
+                    'Stream Bus connection error (%d/%d): %s',
+                    $consecutiveErrors,
+                    self::MAX_CONSECUTIVE_ERRORS,
+                    $e->getMessage()
+                ));
 
-                $messages = $bus->read($currentTopic, $topicOptions);
-
-                if (empty($messages)) {
-                    continue;
+                if ($once || $consecutiveErrors >= self::MAX_CONSECUTIVE_ERRORS) {
+                    $this->error('Too many consecutive errors. Exiting.');
+                    return self::FAILURE;
                 }
 
-                $any = true;
-
-                foreach ($messages as $message) {
-                    $result = $this->processMessage(
-                        $bus, $handler, $currentTopic,
-                        $message, $topicOptions, $ack, $maxAttempts, $once, $stopOnError
-                    );
-
-                    if ($result === self::FAILURE) {
-                        return self::FAILURE;
-                    }
-                }
+                sleep(5);
+                continue; // Skip the normal sleep and memory check on error iterations
             }
 
             if (! $any && ! $once) {
@@ -247,10 +277,15 @@ class StreamBusConsumeCommand extends Command
         $options = array_merge($options, $consumerOptions);
 
         if ($consumerCount > 1) {
-            // With multiple consumers, use a short poll so we don't block on one
-            // stream while others have messages. block=0 in Redis means "block forever",
-            // not non-blocking, so we use a short positive value instead.
-            $options['block'] = 50;
+            // When polling multiple topics in a single loop we must use a short block so
+            // one quiet topic doesn't starve the others. Redis BLOCK 0 means "block forever",
+            // so we use a small finite value instead.
+            //
+            // Units differ by driver:
+            //   streams → milliseconds  (50 ms keeps the loop responsive)
+            //   lists   → seconds       (1 s avoids a multi-minute stall per consumer)
+            $driver = $options['driver'] ?? config('stream-bus.driver', 'streams');
+            $options['block'] = $driver === 'streams' ? 50 : 1;
         }
 
         return $options;
