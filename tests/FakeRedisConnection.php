@@ -11,18 +11,21 @@ class FakeRedisConnection
     public array $kv = [];
     public array $groupsCreated = [];
 
-    public function xadd(string $stream, string $id, array $fields)
+    public function xadd(string $stream, string $id, array $fields, ?int $maxlen = null, bool $approximate = false): string
     {
         $id = $id === '*' ? $this->nextId($stream) : $id;
 
         $this->streams[$stream][$id] = $fields;
 
+        if ($maxlen !== null && count($this->streams[$stream]) > $maxlen) {
+            $this->streams[$stream] = array_slice($this->streams[$stream], -$maxlen, null, true);
+        }
+
         return $id;
     }
 
-    public function xgroup(...$args)
+    public function xgroup(...$args): bool
     {
-        // Expect: CREATE, stream, group, id, MKSTREAM
         if (strtoupper($args[0]) === 'CREATE') {
             $stream = $args[1];
             $group = $args[2];
@@ -38,7 +41,7 @@ class FakeRedisConnection
         return true;
     }
 
-    public function xreadgroup($group, $consumer, array $streams, $count = 1, $block = 0)
+    public function xreadgroup(string $group, string $consumer, array $streams, int $count = 1, int $block = 0): ?array
     {
         $stream = array_key_first($streams);
 
@@ -51,7 +54,7 @@ class FakeRedisConnection
         return [$stream => $batch];
     }
 
-    public function xack(string $stream, string $group, array $ids)
+    public function xack(string $stream, string $group, array $ids): int
     {
         foreach ($ids as $id) {
             $this->acked[] = [$stream, $group, $id];
@@ -61,14 +64,32 @@ class FakeRedisConnection
         return count($ids);
     }
 
-    public function rpush(string $key, string $value)
+    /**
+     * Simulate XAUTOCLAIM: return pending messages older than $minIdleMs.
+     * Returns [nextCursor, [id => fields, ...]] (Redis 6.2+ format).
+     */
+    public function xautoclaim(string $stream, string $group, string $consumer, int $minIdleMs, string $start, int $count = 10): array
+    {
+        if (empty($this->streams[$stream])) {
+            return ['0-0', []];
+        }
+
+        $batch = array_slice($this->streams[$stream], 0, $count, true);
+
+        return ['0-0', $batch];
+    }
+
+    public function rpush(string $key, string $value): int
     {
         $this->lists[$key][] = $value;
 
         return count($this->lists[$key]);
     }
 
-    public function brpop(array $keys, int $timeout)
+    /**
+     * BLPOP — pops from the head of the list (FIFO with rpush).
+     */
+    public function blpop(array $keys, int $timeout): ?array
     {
         $key = $keys[0];
 
@@ -76,12 +97,12 @@ class FakeRedisConnection
             return null;
         }
 
-        $value = array_pop($this->lists[$key]);
+        $value = array_shift($this->lists[$key]);
 
         return [$key, $value];
     }
 
-    public function set(string $key, string $value, string $ex, int $ttl, string $nx)
+    public function set(string $key, string $value, string $ex, int $ttl, string $nx): bool
     {
         if (strtoupper($nx) === 'NX' && array_key_exists($key, $this->kv)) {
             return false;
@@ -89,6 +110,18 @@ class FakeRedisConnection
 
         $this->kv[$key] = $value;
 
+        return true;
+    }
+
+    public function incr(string $key): int
+    {
+        $this->kv[$key] = (int) ($this->kv[$key] ?? 0) + 1;
+
+        return (int) $this->kv[$key];
+    }
+
+    public function expire(string $key, int $seconds): bool
+    {
         return true;
     }
 

@@ -8,8 +8,7 @@
     "illuminate/support": "^11.0|^12.0",
     "illuminate/redis": "^11.0|^12.0",
     "illuminate/console": "^11.0|^12.0",
-    "illuminate/contracts": "^11.0|^12.0",
-    "ramsey/uuid": "^4.7"
+    "illuminate/contracts": "^11.0|^12.0"
   },
   "autoload": {
     "psr-4": {
