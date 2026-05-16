@@ -233,6 +233,32 @@ class StreamBusTest extends TestCase
         $this->assertSame(1, $retried[0]['message']['_attempt']);
     }
 
+    public function test_retry_clears_dedupe_key_so_effectively_once_does_not_block_it(): void
+    {
+        $connection = new FakeRedisConnection();
+        $bus = new StreamBus(new FakeRedisFactory($connection), [
+            'driver'   => 'lists',
+            'prefix'   => 'stream-bus:',
+            'delivery' => 'effectively-once',
+            'dedupe_ttl' => 3600,
+        ]);
+
+        $bus->publish('events:outbound', ['foo' => 'bar']);
+        $messages = $bus->read('events:outbound', ['block' => 0]);
+        $this->assertCount(1, $messages);
+
+        // First delivery marks the dedup key
+        $this->assertTrue($bus->shouldProcess('events:outbound', $messages[0]['id']));
+        // Simulate handler failure — subsequent shouldProcess returns false
+        $this->assertFalse($bus->shouldProcess('events:outbound', $messages[0]['id']));
+
+        // retry() must clear the dedup key so the next delivery is not silently dropped
+        $bus->retry('events:outbound', $messages[0]['message']);
+        $retried = $bus->read('events:outbound', ['block' => 0]);
+        $this->assertCount(1, $retried);
+        $this->assertTrue($bus->shouldProcess('events:outbound', $retried[0]['id']));
+    }
+
     public function test_retry_is_noop_for_streams(): void
     {
         $connection = new FakeRedisConnection();

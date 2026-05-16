@@ -217,6 +217,14 @@ LUA;
         $key = $this->key($topic, $options);
         $message['_attempt'] = ($message['_attempt'] ?? 0) + 1;
 
+        // When effectively-once is active the dedup key was written on first delivery.
+        // Without clearing it, the retry would be silently skipped by shouldProcess().
+        $delivery = $options['delivery'] ?? $this->config['delivery'] ?? 'at-least-once';
+        if ($delivery === 'effectively-once' && isset($message['id'])) {
+            $dedupeKey = $key.':dedupe:'.$message['id'];
+            $this->connection($options)->del($dedupeKey);
+        }
+
         $this->connection($options)->rpush($key, json_encode($message, JSON_THROW_ON_ERROR));
     }
 

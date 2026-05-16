@@ -190,6 +190,19 @@ class FakeRedisConnection
         return true;
     }
 
+    public function del(string ...$keys): int
+    {
+        $count = 0;
+        foreach ($keys as $key) {
+            if (array_key_exists($key, $this->kv)) {
+                unset($this->kv[$key]);
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
     protected function nextId(string $stream): string
     {
         $count = isset($this->streams[$stream]) ? count($this->streams[$stream]) + 1 : 1;
