@@ -320,7 +320,9 @@ LUA;
 
     protected function resolveConsumerName(): string
     {
-        return gethostname() ?: 'consumer-'.getmypid();
+        $host = gethostname() ?: 'consumer';
+
+        return $host.'-'.getmypid();
     }
 
     protected function decodeMessage(string $raw): array

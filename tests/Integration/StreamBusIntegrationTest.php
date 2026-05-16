@@ -174,7 +174,8 @@ class StreamBusIntegrationTest extends TestCase
     {
         $bus = $this->makeBus(['driver' => 'lists']);
 
-        $result = $bus->read('it:queue', ['block' => 0]);
+        // block=0 means "block forever" in Redis; use a short timeout instead
+        $result = $bus->read('it:queue', ['block' => 1]);
 
         $this->assertSame([], $result);
     }
