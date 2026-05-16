@@ -376,22 +376,42 @@ See `examples/` for producers and consumers in Node.js, Python, and Go.
 
 ### Go (streams)
 
-```go
-// Read from stream-bus:events:outbound with XREADGROUP
-// ACK with XACK after processing
-// Publish results to stream-bus:events:inbound with XADD
+```
+examples/go-producer/main.go   — publish via XADD
+examples/go-consumer/main.go   — consume via XREADGROUP / XACK
+```
+
+Run each independently:
+
+```bash
+cd examples/go-producer && go mod init producer && go get github.com/redis/go-redis/v9 github.com/google/uuid && go run main.go
+cd examples/go-consumer && go mod init consumer && go get github.com/redis/go-redis/v9 && go run main.go
 ```
 
 ### Node.js (streams)
 
-```js
-// See examples/node-consumer.js and examples/node-producer.js
+```
+examples/node-producer.js   — publish via xAdd
+examples/node-consumer.js   — consume via xReadGroup / xAck
+```
+
+```bash
+npm install redis
+node examples/node-producer.js
+node examples/node-consumer.js
 ```
 
 ### Python (streams / lists)
 
-```python
-# See examples/python-consumer.py and examples/python-producer.py
+```
+examples/python-producer.py   — publish via xadd
+examples/python-consumer.py   — consume via xreadgroup / xack
+```
+
+```bash
+pip install redis
+python examples/python-producer.py
+python examples/python-consumer.py
 ```
 
 ---

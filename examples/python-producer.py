@@ -1,5 +1,6 @@
 import json
 import time
+import uuid
 import redis
 
 STREAM = 'stream-bus:events:outbound'
@@ -7,7 +8,7 @@ STREAM = 'stream-bus:events:outbound'
 r = redis.Redis()
 
 message = {
-    'id': str(int(time.time() * 1000)),
+    'id': str(uuid.uuid4()),
     'ts': int(time.time()),
     'payload': {'type': 'image.process', 'id': 123}
 }

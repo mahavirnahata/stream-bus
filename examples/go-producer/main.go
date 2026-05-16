@@ -6,6 +6,7 @@ import (
     "fmt"
     "time"
 
+    "github.com/google/uuid"
     "github.com/redis/go-redis/v9"
 )
 
@@ -16,7 +17,7 @@ func main() {
     rdb := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})
 
     payload := map[string]any{
-        "id": fmt.Sprintf("%d", time.Now().UnixNano()),
+        "id": uuid.NewString(),
         "ts": time.Now().Unix(),
         "payload": map[string]any{"type": "image.process", "id": 123},
     }
