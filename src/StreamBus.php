@@ -5,16 +5,20 @@ namespace MahavirNahata\StreamBus;
 use Illuminate\Contracts\Redis\Factory as RedisFactory;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Str;
+use Psr\Log\LoggerInterface;
+use Psr\Log\NullLogger;
 
 class StreamBus
 {
     protected RedisFactory $redis;
     protected array $config;
+    protected LoggerInterface $logger;
 
-    public function __construct(RedisFactory $redis, array $config = [])
+    public function __construct(RedisFactory $redis, array $config = [], ?LoggerInterface $logger = null)
     {
         $this->redis = $redis;
         $this->config = $config;
+        $this->logger = $logger ?? new NullLogger();
     }
 
     /**
@@ -69,7 +73,7 @@ class StreamBus
             $group = $options['group'] ?? 'default';
             $consumer = $options['consumer'] ?? $this->resolveConsumerName();
             $count = (int) ($options['count'] ?? 1);
-            $block = isset($options['block']) ? (int) $options['block'] : 5000;
+            $block = isset($options['block']) ? (int) $options['block'] : 2000;
 
             $this->ensureGroupExists($key, $group, $options);
 
@@ -97,7 +101,7 @@ class StreamBus
         }
 
         // lists driver — FIFO: blpop from head (rpush + blpop = queue, not stack)
-        $timeout = (int) ($options['block'] ?? 5);
+        $timeout = (int) ($options['block'] ?? 2);
         $result = $this->connection($options)->blpop([$key], $timeout);
 
         if (! is_array($result) || count($result) < 2) {
@@ -227,6 +231,47 @@ LUA;
         return $this->publish($dlTopic, array_merge((array) $payload, ['_origin_topic' => $topic]), $options);
     }
 
+    /**
+     * Return basic health metrics for a topic.
+     *
+     * For streams: stream length and pending-entry-list size for the group.
+     * For lists:   list length.
+     *
+     * Values are -1 when the underlying Redis command is unavailable.
+     */
+    public function metrics(string $topic, string $group = 'default', array $options = []): array
+    {
+        $driver = $this->driver($options);
+        $key = $this->key($topic, $options);
+        $conn = $this->connection($options);
+        $base = ['driver' => $driver, 'topic' => $topic, 'key' => $key];
+
+        if ($driver === 'streams') {
+            try {
+                $length = (int) $conn->xlen($key);
+            } catch (\Throwable) {
+                $length = -1;
+            }
+
+            try {
+                $raw = $conn->xpending($key, $group);
+                $pending = is_array($raw) ? (int) ($raw[0] ?? 0) : 0;
+            } catch (\Throwable) {
+                $pending = -1;
+            }
+
+            return array_merge($base, ['group' => $group, 'length' => $length, 'pending' => $pending]);
+        }
+
+        try {
+            $length = (int) $conn->llen($key);
+        } catch (\Throwable) {
+            $length = -1;
+        }
+
+        return array_merge($base, ['length' => $length]);
+    }
+
     protected function driver(array $options): string
     {
         return $options['driver'] ?? $this->config['driver'] ?? 'streams';
@@ -294,13 +339,20 @@ LUA;
      * detect the underlying client and call accordingly. Both branches produce
      * an approximate trim with the '~' modifier, which is O(1) and safe for
      * high-throughput streams.
+     *
+     * A class_exists guard is required because \Redis (the phpredis extension
+     * class) does not exist when only predis is installed; without the guard,
+     * `instanceof \Redis` would throw a fatal \Error.
      */
     protected function trimStream(string $key, int $maxlen, array $options): void
     {
         $conn = $this->connection($options);
 
         // phpredis: client() returns a \Redis instance; predis returns a Predis\Client
-        if (method_exists($conn, 'client') && $conn->client() instanceof \Redis) {
+        if (class_exists(\Redis::class)
+            && method_exists($conn, 'client')
+            && $conn->client() instanceof \Redis
+        ) {
             $conn->xtrim($key, $maxlen, true);
 
             return;
@@ -309,8 +361,12 @@ LUA;
         // Predis 2.x / unknown clients: xtrim($key, 'MAXLEN', '~', $count)
         try {
             $conn->xtrim($key, 'MAXLEN', '~', $maxlen);
-        } catch (\Throwable) {
-            // Cannot trim; stream will grow until managed externally.
+        } catch (\Throwable $e) {
+            $this->logger->warning('StreamBus: stream trim failed; stream will grow unbounded until managed externally.', [
+                'key' => $key,
+                'maxlen' => $maxlen,
+                'error' => $e->getMessage(),
+            ]);
         }
     }
 

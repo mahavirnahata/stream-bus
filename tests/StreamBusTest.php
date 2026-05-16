@@ -354,6 +354,50 @@ class StreamBusTest extends TestCase
     }
 
     // -------------------------------------------------------------------------
+    // Metrics
+    // -------------------------------------------------------------------------
+
+    public function test_metrics_returns_stream_length_and_pending(): void
+    {
+        $connection = new FakeRedisConnection();
+        $bus = new StreamBus(new FakeRedisFactory($connection), [
+            'driver' => 'streams',
+            'prefix' => 'stream-bus:',
+        ]);
+
+        $bus->publish('events:outbound', ['n' => 1]);
+        $bus->publish('events:outbound', ['n' => 2]);
+
+        $m = $bus->metrics('events:outbound', 'g1');
+
+        $this->assertSame('streams', $m['driver']);
+        $this->assertSame('events:outbound', $m['topic']);
+        $this->assertSame('stream-bus:events:outbound', $m['key']);
+        $this->assertSame('g1', $m['group']);
+        $this->assertSame(2, $m['length']);
+        $this->assertSame(2, $m['pending']);
+    }
+
+    public function test_metrics_returns_list_length(): void
+    {
+        $connection = new FakeRedisConnection();
+        $bus = new StreamBus(new FakeRedisFactory($connection), [
+            'driver' => 'lists',
+            'prefix' => 'stream-bus:',
+        ]);
+
+        $bus->publish('events:outbound', ['n' => 1]);
+        $bus->publish('events:outbound', ['n' => 2]);
+        $bus->publish('events:outbound', ['n' => 3]);
+
+        $m = $bus->metrics('events:outbound');
+
+        $this->assertSame('lists', $m['driver']);
+        $this->assertSame(3, $m['length']);
+        $this->assertArrayNotHasKey('pending', $m);
+    }
+
+    // -------------------------------------------------------------------------
     // Shared / options
     // -------------------------------------------------------------------------
 

@@ -4,6 +4,7 @@ namespace MahavirNahata\StreamBus;
 
 use Illuminate\Support\ServiceProvider;
 use MahavirNahata\StreamBus\Console\StreamBusConsumeCommand;
+use Psr\Log\LoggerInterface;
 
 class StreamBusServiceProvider extends ServiceProvider
 {
@@ -17,7 +18,8 @@ class StreamBusServiceProvider extends ServiceProvider
         $this->app->singleton(StreamBus::class, function ($app) {
             return new StreamBus(
                 $app['redis'],
-                $app['config']->get('stream-bus', [])
+                $app['config']->get('stream-bus', []),
+                $app->make(LoggerInterface::class),
             );
         });
 

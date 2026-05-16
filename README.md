@@ -1,42 +1,21 @@
 # Stream Bus for Laravel
 
-A small Redis-backed stream bus for cross-language workers. Supports Redis Streams and Lists, configurable via `config/stream-bus.php`.
+A Redis-backed cross-language stream bus for Laravel. Publish from any language; consume in Laravel (or vice versa) with at-least-once or effectively-once delivery.
 
 ## Requirements
 
 - PHP 8.2+
-- Laravel 11/12
-- Redis server
+- Laravel 11 or 12
+- Redis 5.0+ (Redis 6.2+ for PEL recovery via XAUTOCLAIM)
+- phpredis extension **or** predis/predis 2.x
 
-## Features
-
-- Redis Streams and Lists drivers
-- Consumer command with long-running loop
-- Cross-language interoperability (Node, Go, Python)
-- Optional dedupe for effectively-once processing
-- Multiple consumers configured via config
-
-## Install (Packagist)
+## Installation
 
 ```bash
 composer require mahavirnahata/stream-bus
 ```
 
-## Install (local development)
-Add a path repository and require the package:
-
-```json
-{
-  "repositories": [
-    { "type": "path", "url": "packages/stream-bus" }
-  ],
-  "require": {
-    "mahavirnahata/stream-bus": "*"
-  }
-}
-```
-
-Publish config:
+Publish the config file:
 
 ```bash
 php artisan vendor:publish --tag=stream-bus-config
@@ -44,32 +23,7 @@ php artisan vendor:publish --tag=stream-bus-config
 
 ## Quick start
 
-```php
-use MahavirNahata\StreamBus\Facades\StreamBus;
-
-StreamBus::publish('events:outbound', [
-    'type' => 'image.process',
-    'payload' => ['id' => 123],
-]);
-```
-
-Run a consumer from Laravel:
-
-```bash
-php artisan stream-bus:consume events:inbound App\Handlers\ImageResultHandler --group=laravel
-```
-
-You can also configure consumers in `config/stream-bus.php` and run:
-
-```bash
-php artisan stream-bus:consume
-```
-
-## End-to-end examples
-
-### Example 1: Laravel dispatches, Node.js listens
-
-**Laravel (dispatcher)**:
+**Publish a message:**
 
 ```php
 use MahavirNahata\StreamBus\Facades\StreamBus;
@@ -80,17 +34,9 @@ StreamBus::publish('events:outbound', [
 ]);
 ```
 
-**Node.js (listener)**: see `examples/node-consumer.js` reading from `stream-bus:events:outbound`.
-
-### Example 2: Node.js dispatches, Laravel listens
-
-**Node.js (dispatcher)**: see `examples/node-producer.js` writing to `stream-bus:events:inbound`.
-
-**Laravel (listener)**:
+**Create a handler:**
 
 ```php
-<?php
-
 namespace App\Handlers;
 
 use MahavirNahata\StreamBus\Contracts\StreamBusHandler;
@@ -99,179 +45,394 @@ class ImageResultHandler implements StreamBusHandler
 {
     public function handle(array $message): void
     {
-        // Handle inbound data from Node.js
-        event(new \\App\\Events\\ExternalResultReceived($message['payload'] ?? []));
+        // $message['payload'] contains your data
+        dispatch(new ProcessImageResult($message['payload'] ?? []));
     }
 }
 ```
 
-Run:
-
-```bash
-php artisan stream-bus:consume events:inbound App\\Handlers\\ImageResultHandler --group=laravel
-```
-
-Or, with config:
-
-```bash
-php artisan stream-bus:consume
-```
-
-## Configuration
-
-```php
-return [
-    'driver' => env('STREAM_BUS_DRIVER', 'streams'), // streams|lists
-    'connection' => env('STREAM_BUS_REDIS', 'default'),
-    'prefix' => env('STREAM_BUS_PREFIX', 'stream-bus:'),
-    'delivery' => env('STREAM_BUS_DELIVERY', 'at-least-once'), // at-least-once|effectively-once
-    'dedupe_ttl' => env('STREAM_BUS_DEDUPE_TTL', 86400),
-    'consumers' => [
-        'events:inbound' => App\Handlers\ImageResultHandler::class,
-        'events:other' => [
-            'handler' => App\Handlers\OtherHandler::class,
-            'driver' => 'streams',
-            'group' => 'other-group',
-            'block' => 2000,
-        ],
-    ],
-];
-```
-
-### Config reference
-
-- `driver`: `streams` or `lists`
-- `connection`: Redis connection name
-- `prefix`: Key prefix for all topics
-- `delivery`: `at-least-once` or `effectively-once`
-- `dedupe_ttl`: Dedupe TTL in seconds
-- `consumers`: Map of `topic => handler` or `topic => options`
-
-### Shared Redis guidance
-
-This package only reads from the **configured stream/list key**, not the whole Redis instance.
-If you share Redis with other apps, use a **unique prefix** or a **separate Redis connection/db**:
-
-```env
-STREAM_BUS_PREFIX=app1:bus:
-STREAM_BUS_REDIS=stream-bus
-```
-
-## Publish messages
-
-```php
-use MahavirNahata\StreamBus\StreamBus;
-
-app(StreamBus::class)->publish('events:outbound', [
-    'type' => 'image.process',
-    'payload' => ['id' => 123],
-]);
-```
-
-## Consume from Laravel
-
-1. Create a handler:
-
-```php
-use MahavirNahata\StreamBus\Contracts\StreamBusHandler;
-
-class ImageResultHandler implements StreamBusHandler
-{
-    public function handle(array $message): void
-    {
-        // handle response
-    }
-}
-```
-
-2. Run the consumer:
+**Start consuming:**
 
 ```bash
 php artisan stream-bus:consume events:inbound App\Handlers\ImageResultHandler --group=laravel
 ```
 
-Or, with config (single or multiple consumers):
+---
 
-```bash
-php artisan stream-bus:consume
+## Drivers
+
+| | Streams (`streams`) | Lists (`lists`) |
+|---|---|---|
+| Redis primitive | XADD / XREADGROUP | RPUSH / BLPOP |
+| Ordering | FIFO, guaranteed | FIFO, guaranteed |
+| Consumer groups | Yes | No |
+| At-least-once | Yes (PEL + ACK) | Yes (pop is destructive) |
+| Multi-consumer | Yes, independent | Yes, competing |
+| PEL recovery | Yes (XAUTOCLAIM) | N/A |
+| Cross-language | Any client that speaks Redis Streams | Any client that speaks Redis Lists |
+
+**Use `streams`** (default) when you need consumer groups, per-message ACK, and PEL recovery after crashes.
+
+**Use `lists`** for simpler competing-consumer queues where Redis Streams features are not required.
+
+---
+
+## Configuration
+
+```php
+// config/stream-bus.php
+return [
+    'driver'           => env('STREAM_BUS_DRIVER', 'streams'),
+    'connection'       => env('STREAM_BUS_REDIS', 'default'),
+    'prefix'           => env('STREAM_BUS_PREFIX', 'stream-bus:'),
+    'cluster'          => env('STREAM_BUS_CLUSTER', false),
+    'delivery'         => env('STREAM_BUS_DELIVERY', 'at-least-once'),
+    'dedupe_ttl'       => env('STREAM_BUS_DEDUPE_TTL', 86400),
+    'maxlen'           => env('STREAM_BUS_MAXLEN', null),
+    'reclaim'          => env('STREAM_BUS_RECLAIM', false),
+    'min_idle_time'    => env('STREAM_BUS_MIN_IDLE_TIME', 60000),
+    'reclaim_count'    => env('STREAM_BUS_RECLAIM_COUNT', 10),
+    'max_attempts'     => env('STREAM_BUS_MAX_ATTEMPTS', 0),
+    'dead_letter_topic'=> env('STREAM_BUS_DEAD_LETTER_TOPIC', null),
+    'consumers'        => [],
+];
 ```
 
-## Consumer command options
+### Config reference
 
-- `topic`: Topic name (optional if configured)
-- `handler`: Handler class (optional if configured)
-- `--driver`: `streams` or `lists`
-- `--connection`: Redis connection
-- `--prefix`: Key prefix
-- `--group`: Consumer group (streams)
-- `--consumer`: Consumer name (streams, defaults to hostname)
-- `--count`: Messages per read (streams)
-- `--block`: Block time in ms (streams) or seconds (lists)
-- `--delivery`: `at-least-once` or `effectively-once`
-- `--dedupe-ttl`: Dedupe TTL seconds
-- `--once`: Read once and exit
-- `--sleep`: Sleep ms when no messages
-- `--no-ack`: Disable ACK (streams)
-- `--stop-on-error`: Exit if handler throws
+| Key | Default | Description |
+|---|---|---|
+| `driver` | `streams` | `streams` or `lists` |
+| `connection` | `default` | Laravel Redis connection name |
+| `prefix` | `stream-bus:` | Key prefix for all topics |
+| `cluster` | `false` | Wrap topic in `{}` hash tags for Redis Cluster slot colocation |
+| `delivery` | `at-least-once` | `at-least-once` or `effectively-once` |
+| `dedupe_ttl` | `86400` | Dedup / attempt key TTL in seconds |
+| `maxlen` | `null` | Max stream entries; `null` = unlimited. **Set this in production.** |
+| `reclaim` | `false` | Enable automatic PEL recovery (Redis 6.2+) |
+| `min_idle_time` | `60000` | ms a PEL message must be idle before reclaim |
+| `reclaim_count` | `10` | Max messages to reclaim per loop |
+| `max_attempts` | `0` | Max handler attempts before dead-lettering (`0` = unlimited) |
+| `dead_letter_topic` | `null` | DLQ topic; defaults to `{original}:dead-letter` |
+| `consumers` | `[]` | Topic → handler map (see below) |
 
-### Delivery semantics
+### Consumers config
 
-- **at-least-once**: default
-- **effectively-once**: best-effort dedupe using a Redis key per message ID
+```php
+'consumers' => [
+    // Simple form
+    'events:inbound' => App\Handlers\ImageResultHandler::class,
 
-Override from CLI:
-
-```bash
-php artisan stream-bus:consume events:inbound App\Handlers\ImageResultHandler --delivery=effectively-once --dedupe-ttl=3600
+    // Per-topic overrides
+    'events:orders' => [
+        'handler'           => App\Handlers\OrderHandler::class,
+        'driver'            => 'streams',
+        'group'             => 'order-workers',
+        'count'             => 5,
+        'delivery'          => 'effectively-once',
+        'dead_letter_topic' => 'events:orders:dead-letter',
+    ],
+],
 ```
 
-## Examples
+---
 
-See `examples/` for producers and consumers in Node, Python, Go, and a Laravel handler example.
+## Publishing messages
 
-## Round trip flow (outbound -> external worker -> inbound)
+```php
+// Facade
+use MahavirNahata\StreamBus\Facades\StreamBus;
+StreamBus::publish('events:outbound', ['foo' => 'bar']);
 
-1. Laravel publishes to `events:outbound`.
-2. External worker consumes and processes.
-3. External worker publishes results to `events:inbound`.
-4. Laravel consumes `events:inbound` and dispatches app jobs.
+// Helper function
+stream_bus()->publish('events:outbound', ['foo' => 'bar']);
 
-## Consume from other languages
+// Injected class
+use MahavirNahata\StreamBus\StreamBus;
+public function __construct(private StreamBus $bus) {}
+$this->bus->publish('events:outbound', ['foo' => 'bar']);
+```
 
-Examples are in `examples/`.
+Per-call option overrides:
 
-### Go (Streams)
+```php
+StreamBus::publish('events:outbound', $payload, [
+    'driver'     => 'lists',
+    'connection' => 'redis-secondary',
+    'prefix'     => 'app1:bus:',
+]);
+```
 
-- Use `XREADGROUP` on stream `stream-bus:events:outbound`
-- Consumer group: `workers`
-- ACK with `XACK`
+---
 
-### Node / Python (Streams)
+## Consumer command
 
-- Use your Redis client to read from the stream with a consumer group
-- Write responses to `stream-bus:events:inbound`
+```bash
+php artisan stream-bus:consume [topic] [handler] [options]
+```
 
-## Delivery guarantees
+### Arguments
 
-- **Streams** and **Lists** are **at-least-once** by default.
-- **Effectively-once** uses best-effort dedupe for a configurable TTL.
+| Argument | Description |
+|---|---|
+| `topic` | Topic to consume (optional if `consumers` is configured) |
+| `handler` | Handler class name (required when `topic` is given) |
+
+### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `--driver` | config | `streams` or `lists` |
+| `--connection` | config | Redis connection name |
+| `--prefix` | config | Key prefix |
+| `--group` | `default` | Consumer group (streams) |
+| `--consumer` | hostname | Consumer name (streams) |
+| `--count` | `1` | Messages per read (streams) |
+| `--block` | `2000` | Block time: ms for streams, seconds for lists |
+| `--delivery` | config | `at-least-once` or `effectively-once` |
+| `--dedupe-ttl` | config | Dedup key TTL in seconds |
+| `--once` | — | Read once and exit |
+| `--sleep` | `200` | Sleep ms between polls when idle |
+| `--no-ack` | — | Skip ACK (streams) |
+| `--stop-on-error` | — | Exit if the handler throws |
+| `--max-attempts` | config | Max attempts before dead-lettering (`0` = unlimited) |
+| `--dead-letter-topic` | config | Override DLQ topic name |
+| `--memory` | `128` | Exit when process memory exceeds this MB limit |
+| `--reclaim` | config | Enable PEL reclaim each loop (Redis 6.2+) |
+| `--min-idle-time` | `60000` | ms before a PEL message is eligible for reclaim |
+
+---
+
+## Delivery semantics
+
+### at-least-once (default)
+
+Messages are processed at least once. Duplicate delivery is possible after a crash. Use idempotent handlers.
+
+### effectively-once
+
+A Redis `SET NX EX` key is written on first processing. Duplicates within `dedupe_ttl` seconds are skipped.
+
+```bash
+php artisan stream-bus:consume events:inbound App\Handlers\Foo \
+    --delivery=effectively-once \
+    --dedupe-ttl=3600
+```
+
+---
+
+## Dead-letter queue
+
+When `max_attempts` is set and a handler fails that many times, the message is published to the dead-letter topic and ACKed (streams) or discarded (lists).
+
+```env
+STREAM_BUS_MAX_ATTEMPTS=3
+STREAM_BUS_DEAD_LETTER_TOPIC=events:dead
+```
+
+Or per command:
+
+```bash
+php artisan stream-bus:consume events:inbound App\Handlers\Foo \
+    --max-attempts=3 \
+    --dead-letter-topic=events:dead
+```
+
+Consume dead-letter messages like any other topic:
+
+```bash
+php artisan stream-bus:consume events:dead App\Handlers\DeadLetterInspector
+```
+
+---
+
+## PEL recovery (streams only)
+
+When a consumer crashes while processing, its messages sit unacknowledged in Redis's Pending Entry List (PEL) forever without intervention. Enable automatic reclaim to re-queue them:
+
+```env
+STREAM_BUS_RECLAIM=true
+STREAM_BUS_MIN_IDLE_TIME=60000   # 60 seconds idle before reclaiming
+STREAM_BUS_RECLAIM_COUNT=10      # max reclaimed per loop
+```
+
+Or via CLI:
+
+```bash
+php artisan stream-bus:consume --reclaim --min-idle-time=60000
+```
+
+**Requires Redis 6.2+** (uses XAUTOCLAIM internally).
+
+---
+
+## Redis Cluster
+
+All related keys (stream, dedupe, attempts) must land on the same hash slot. Enable hash-tag wrapping:
+
+```env
+STREAM_BUS_CLUSTER=true
+```
+
+With `cluster=true`, the topic `events:outbound` produces keys like `stream-bus:{events:outbound}`, `stream-bus:{events:outbound}:dedupe:{id}`, etc. — all guaranteed to the same slot.
+
+---
+
+## Stream length management
+
+Redis Streams grow indefinitely without trimming. Set a limit in production:
+
+```env
+STREAM_BUS_MAXLEN=100000
+```
+
+Trimming uses the `~` approximate modifier (O(1)). Requires phpredis; on predis the package falls back to a separate XTRIM call (logged as a warning if that also fails).
+
+---
+
+## Metrics
+
+Retrieve live stream / queue health metrics:
+
+```php
+$metrics = stream_bus()->metrics('events:outbound', 'default');
+
+// streams result:
+// [
+//   'driver'  => 'streams',
+//   'topic'   => 'events:outbound',
+//   'key'     => 'stream-bus:events:outbound',
+//   'group'   => 'default',
+//   'length'  => 1500,   // total entries in stream
+//   'pending' => 3,      // delivered but not yet ACKed
+// ]
+
+// lists result:
+// [
+//   'driver' => 'lists',
+//   'topic'  => 'events:outbound',
+//   'key'    => 'stream-bus:events:outbound',
+//   'length' => 42,
+// ]
+```
+
+A value of `-1` indicates the Redis command is unavailable for the current client version.
+
+---
+
+## Production deployment
+
+### Supervisor
+
+```ini
+[program:stream-bus-inbound]
+command=php /var/www/artisan stream-bus:consume events:inbound App\Handlers\ImageResultHandler
+    --group=laravel
+    --memory=128
+    --reclaim
+    --max-attempts=3
+autostart=true
+autorestart=true
+stopwaitsecs=10
+user=www-data
+redirect_stderr=true
+stdout_logfile=/var/log/stream-bus-inbound.log
+```
+
+### Graceful shutdown
+
+The consume command installs POSIX signal handlers (SIGTERM, SIGINT, SIGHUP) when the `pcntl` extension is available. On signal receipt, the current batch completes and the process exits cleanly. The default `--block=2000` means the worst-case shutdown delay is ~2 seconds.
+
+Reduce `--block` further if you need faster shutdown response (e.g. for Kubernetes with a short grace period).
+
+### Memory management
+
+The `--memory=128` flag exits the process when RSS exceeds the limit, allowing Supervisor to restart it. This prevents slow memory leaks from accumulating indefinitely.
+
+### Shared Redis
+
+If you share Redis with other workloads, isolate the bus with a unique prefix or a dedicated Redis connection:
+
+```env
+STREAM_BUS_PREFIX=myapp:bus:
+STREAM_BUS_REDIS=stream-bus-connection
+```
+
+---
+
+## Cross-language interoperability
+
+The wire format for every message is:
+
+```json
+{
+  "id": "<uuid-v4>",
+  "ts": 1716000000,
+  "payload": { "your": "data" }
+}
+```
+
+See `examples/` for producers and consumers in Node.js, Python, and Go.
+
+### Go (streams)
+
+```go
+// Read from stream-bus:events:outbound with XREADGROUP
+// ACK with XACK after processing
+// Publish results to stream-bus:events:inbound with XADD
+```
+
+### Node.js (streams)
+
+```js
+// See examples/node-consumer.js and examples/node-producer.js
+```
+
+### Python (streams / lists)
+
+```python
+# See examples/python-consumer.py and examples/python-producer.py
+```
+
+---
 
 ## Troubleshooting
 
-- Consumer exits immediately: ensure your handler class exists and implements `StreamBusHandler`, and `consumers` is not empty when using config.
-- No messages received: verify the topic name and prefix, and for streams ensure the correct group/consumer is used.
-- Duplicate processing: use `delivery=effectively-once` and a reasonable `dedupe_ttl`.
+**Consumer exits immediately with "Handler class not found"**  
+Ensure the handler class exists, is autoloaded, and implements `StreamBusHandler`.
+
+**No messages received**  
+Verify topic name and prefix match between publisher and consumer. For streams, confirm the group name matches.
+
+**Duplicate messages**  
+Expected with `at-least-once`. Switch to `effectively-once` with idempotent handlers, or use `max_attempts=1` with a dead-letter queue.
+
+**Stream grows unbounded**  
+Set `STREAM_BUS_MAXLEN` in your `.env`.
+
+**Shutdown takes too long**  
+Reduce `--block` (e.g. `--block=500`). The maximum shutdown delay equals the block time.
+
+**PEL grows after consumer crashes**  
+Enable `--reclaim` or set `STREAM_BUS_RECLAIM=true`. Requires Redis 6.2+.
+
+---
 
 ## FAQ
 
 **Does it scan all Redis keys?**  
-No. It only reads the configured topic key with your prefix.
+No — it reads only the configured topic key with your prefix.
 
-**Can I run multiple consumers?**  
-Yes. Define multiple entries in `consumers` and run `php artisan stream-bus:consume`.
+**Can I run multiple consumers for the same topic?**  
+Yes. With the streams driver, consumers in the same group share the load. With lists, multiple consumers compete naturally.
 
-**Exactly-once?**  
-Not guaranteed. Use effectively-once with idempotent handlers.
+**Exactly-once delivery?**  
+Not guaranteed. Use `effectively-once` with idempotent handlers for the best-effort equivalent.
+
+**Can I use this without Laravel?**  
+The core `StreamBus` class only depends on `Illuminate\Contracts\Redis\Factory`. You can wire it up manually in any container.
+
+---
 
 ## License
 

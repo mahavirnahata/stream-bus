@@ -106,6 +106,23 @@ class FakeRedisConnection
         return $trimmed;
     }
 
+    /** Returns the number of entries in a stream. */
+    public function xlen(string $stream): int
+    {
+        return count($this->streams[$stream] ?? []);
+    }
+
+    /**
+     * XPENDING summary form: [count, smallest-id, largest-id, [[consumer, count], ...]].
+     * In the fake, all stream entries are treated as pending (not yet acked).
+     */
+    public function xpending(string $stream, string $group, mixed ...$args): array
+    {
+        $count = count($this->streams[$stream] ?? []);
+
+        return [$count, null, null, null];
+    }
+
     public function rpush(string $key, string $value): int
     {
         $this->lists[$key][] = $value;
@@ -127,6 +144,12 @@ class FakeRedisConnection
         $value = array_shift($this->lists[$key]);
 
         return [$key, $value];
+    }
+
+    /** Returns the number of entries in a list. */
+    public function llen(string $key): int
+    {
+        return count($this->lists[$key] ?? []);
     }
 
     public function set(string $key, string $value, string $ex, int $ttl, string $nx): bool

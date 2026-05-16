@@ -18,7 +18,7 @@ class StreamBusConsumeCommand extends Command
         {--group=default : Consumer group (streams only)}
         {--consumer= : Consumer name (streams only)}
         {--count=1 : Number of messages per read (streams only)}
-        {--block=5000 : Block time in ms for streams, seconds for lists}
+        {--block=2000 : Block time in ms for streams, seconds for lists (shorter = faster shutdown response)}
         {--delivery= : at-least-once|effectively-once}
         {--dedupe-ttl= : Dedupe TTL in seconds}
         {--once : Read only once and exit}
